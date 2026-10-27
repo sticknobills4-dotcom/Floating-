@@ -1,0 +1,338 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Generate project files
+        run: |
+          set -e
+          mkdir -p FloatBall/app/src/main/res/values
+          cat > FloatBall/app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">FloatBall</string>
+              <string name="acc_desc">Floating ball tap panna screenshot edukkum</string>
+          </resources>
+          EOF
+          mkdir -p FloatBall/app/src/main/java/com/santhosh/floatball FloatBall/app/src/main/res/xml
+          cat > FloatBall/settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "FloatBall"
+          include(":app")
+          EOF
+          cat > FloatBall/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > FloatBall/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          kotlin.code.style=official
+          EOF
+          cat > FloatBall/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.santhosh.floatball"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.santhosh.floatball"
+                  minSdk = 30
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          cat > FloatBall/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@android:drawable/ic_menu_camera"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+
+                  <service android:name=".FloatingService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="floating_screenshot_button"/>
+                  </service>
+
+                  <service android:name=".ShotService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config"/>
+                  </service>
+
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+          cat > FloatBall/app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canTakeScreenshot="true"
+              android:description="@string/acc_desc"
+              android:notificationTimeout="100"/>
+          EOF
+          cat > FloatBall/app/src/main/java/com/santhosh/floatball/App.kt <<'EOF'
+          package com.santhosh.floatball
+
+          import android.Manifest
+          import android.accessibilityservice.AccessibilityService
+          import android.app.Activity
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.view.Display
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import kotlin.math.abs
+
+          class ShotService : AccessibilityService() {
+
+              companion object { var instance: ShotService? = null }
+
+              override fun onServiceConnected() { instance = this }
+              override fun onDestroy() { instance = null; super.onDestroy() }
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              fun capture(onDone: () -> Unit) {
+                  takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor,
+                      object : TakeScreenshotCallback {
+                          override fun onSuccess(r: ScreenshotResult) {
+                              try {
+                                  val hw = Bitmap.wrapHardwareBuffer(r.hardwareBuffer, r.colorSpace)
+                                  val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                  r.hardwareBuffer.close()
+                                  if (bmp != null) save(bmp) else toast("Screenshot failed")
+                              } catch (e: Exception) { toast("Error: ${e.message}") }
+                              onDone()
+                          }
+                          override fun onFailure(code: Int) {
+                              toast("Screenshot blocked / failed ($code)")
+                              onDone()
+                          }
+                      })
+              }
+
+              private fun save(bmp: Bitmap) {
+                  val name = "SS_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
+                  val values = ContentValues().apply {
+                      put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                      put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                      put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/FloatBall")
+                  }
+                  val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                  if (uri == null) { toast("Save failed"); return }
+                  contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                  toast("Saved: Pictures/FloatBall/$name")
+              }
+
+              private fun toast(m: String) =
+                  Handler(Looper.getMainLooper()).post { Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
+          }
+
+          class FloatingService : Service() {
+
+              private lateinit var wm: WindowManager
+              private var ball: TextView? = null
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("fb", "FloatBall", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "fb")
+                      .setContentTitle("FloatBall running")
+                      .setContentText("Ball tap panna screenshot edukkum")
+                      .setSmallIcon(android.R.drawable.ic_menu_camera)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 34)
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  else startForeground(1, n)
+                  addBall()
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun addBall() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val size = dp(56)
+                  val v = TextView(this).apply {
+                      text = "📷"; textSize = 22f; gravity = Gravity.CENTER
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.parseColor("#CC1565C0"))
+                      }
+                      alpha = 0.9f
+                  }
+                  val lp = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(8); y = dp(300) }
+
+                  var sx = 0; var sy = 0; var tx = 0f; var ty = 0f; var moved = false
+                  v.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> { sx = lp.x; sy = lp.y; tx = e.rawX; ty = e.rawY; moved = false }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - tx; val dy = e.rawY - ty
+                              if (abs(dx) > 12 || abs(dy) > 12) moved = true
+                              if (moved) { lp.x = (sx + dx).toInt(); lp.y = (sy + dy).toInt(); wm.updateViewLayout(v, lp) }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) shoot()
+                      }
+                      true
+                  }
+                  wm.addView(v, lp)
+                  ball = v
+              }
+
+              private fun shoot() {
+                  val svc = ShotService.instance
+                  if (svc == null) {
+                      Toast.makeText(this, "Accessibility service ON pannu (app la button)", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  ball?.visibility = View.INVISIBLE   // ball screenshot la varakoodathu
+                  Handler(Looper.getMainLooper()).postDelayed({
+                      svc.capture { ball?.visibility = View.VISIBLE }
+                  }, 250)
+              }
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int) = START_STICKY
+
+              override fun onDestroy() {
+                  ball?.let { wm.removeView(it) }
+                  super.onDestroy()
+              }
+          }
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  if (i.action == Intent.ACTION_BOOT_COMPLETED && Settings.canDrawOverlays(c))
+                      c.startForegroundService(Intent(c, FloatingService::class.java))
+              }
+          }
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad * 2, pad, pad) }
+                  fun btn(t: String, a: () -> Unit) = root.addView(Button(this).apply { text = t; setOnClickListener { a() } })
+
+                  root.addView(TextView(this).apply {
+                      text = "FloatBall\n\nStep 1 → 2 → 3 follow pannu"; textSize = 18f
+                  })
+                  btn("1. Overlay permission") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  }
+                  btn("2. Accessibility ON (FloatBall)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  btn("3. Start floating ball") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "First overlay permission kudu", Toast.LENGTH_SHORT).show()
+                      } else {
+                          if (Build.VERSION.SDK_INT >= 33)
+                              requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                          startForegroundService(Intent(this, FloatingService::class.java))
+                      }
+                  }
+                  btn("Stop ball") { stopService(Intent(this, FloatingService::class.java)) }
+                  btn("Battery optimisation off (Xiaomi/Oppo/Vivo)") {
+                      startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                  }
+                  setContentView(root)
+              }
+          }
+          EOF
+      - name: Build debug APK
+        working-directory: FloatBall
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FloatBall-apk
+          path: FloatBall/app/build/outputs/apk/debug/*.apk
+          
